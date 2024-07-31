@@ -1,0 +1,10 @@
+.snakemake
+data/*
+workflow/logs/*
+workflow/slurm/*
+workflow/scripts/notes.sh
+output/mpmap/*
+git-filter-repo
+output/UP_counts/*.out
+output/counts/*
+rpvg
