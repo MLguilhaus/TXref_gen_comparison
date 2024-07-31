@@ -1,0 +1,589 @@
+---
+title: "Trimming QC"
+author: |
+  | Dr Stevie Pederson
+  | Black Ochre Data Labs
+  | Telethon Kids Institute
+  | Adelaide, Australia
+date: '`r format(Sys.Date(), "%d %b, %Y")`'
+bibliography: references.bib
+link-citations: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(
+  message = FALSE, warning = FALSE,
+  fig.height = 8, fig.width = 10
+)
+```
+
+```{r packages}
+library(tidyverse)
+library(ngsReports)
+library(yaml)
+library(pander)
+library(glue)
+library(scales)
+library(reactable)
+library(htmltools)
+library(Biostrings)
+panderOptions("big.mark", ",")
+panderOptions("table.split.table", Inf)
+theme_set(theme_bw() + theme(legend.position = "none"))
+```
+
+```{r data}
+config <- here::here("config", "config.yml") %>% 
+  read_yaml()
+samples <- read_tsv(here::here(config$samples))
+samples <- linear_metadata
+fpl <- here::here("output", "fastp", paste0(samples$Sample, "_fastp.json")) %>%
+  FastpDataList()
+
+```
+
+
+
+```{r define-table}
+fpl %>%
+  getModule("Summary") %>%
+  .[["Filtering_result"]] %>%
+  mutate(
+    sample = str_extract(Filename, "SRR[0-9]+")
+    ) %>%
+  dplyr::select(sample, result, total) %>%
+  dplyr::filter(total > 0) %>%
+  pivot_wider(names_from = result, values_from = total) %>%
+  mutate(
+    input = rowSums(dplyr::select(., ends_with("reads"))),
+    prop_retained = passed_filter_reads / input,
+    across(matches("too|low"), \(x) x / input) 
+  ) %>%
+  dplyr::select(sample, input, passed_filter_reads, prop_retained, everything()) %T>%
+  write_tsv(here::here("output", "fastp", "filtering_result.tsv")) %>%
+  reactable(
+    filterable = FALSE,
+    columns = list(
+      input = colDef("Input Reads", format = colFormat(separators = TRUE)),
+      passed_filter_reads = colDef("Passed Filter Reads", 
+                                   format = colFormat(separators = TRUE)),
+      prop_retained = colDef( "Passed Filter (%)", 
+                              format = colFormat(percent = TRUE, digits = 2)),
+      low_quality_reads = colDef("Low Quality (%)", 
+                                 format = colFormat(percent = TRUE, digits = 2)),
+      too_many_N_reads = colDef("Too Many N (%)", 
+                                 format = colFormat(percent = TRUE, digits = 2)),
+      too_short_reads = colDef("Short Reads (%)", 
+                               format = colFormat(percent = TRUE, digits = 2))
+    )
+  )
+```
+SRR15881903, SRR15881955, SRR15881961 input 75-90M reads, had  69-88M reads passed filter, with ~90% of total reads passing filter.
+SRR15881946, SRR15881891, SRR15881949 had > 30M reads passing filter with ~93% of total reads passing filter. 
+Maybe good for testing graph alignment. 
+
+
+# Introduction
+
+The tool `fastp` [@Chen2023-iy] was used for all pre-processing of raw FastQ files in this workflow, with parameters are listed below:
+
+`r pander(config$fastp)`
+
+In particular, the `--dup_calc_accuracy` parameter can be assigned on a range of 1 to 6, with 6 being the most computationally rigorous.
+This process depends on the presence of UMIs, with raw FastQ files already having had the MGI UMI moved to the index within the read header.
+
+As is common, reads had been lightly processed by the SAGC core facility -- I didn't write this.. 
+
+# Initial QC Tables
+
+## Basic Summary
+
+```{r tbl-summary}
+## Note, links in final table dont work
+tbl <- getModule(fpl, "Summary")$Before_filtering %>%
+  dplyr::mutate(
+    sample = str_remove_all(Filename, "_fastp.json"),
+    total_reads = total_reads / 2,
+    mean_read_length = 0.5 * (read1_mean_length + read2_mean_length)
+  ) %>% 
+  dplyr::select(sample, total_reads, mean_read_length, q30_rate, gc_content) %>% 
+  left_join(samples, by = c("sample" = "Sample")) %>% 
+  reactable(
+    sortable = TRUE, resizable = TRUE, #changed the sortable here
+    showPageSizeOptions = FALSE, 
+    columns = list(
+      sample = colDef(
+        name = "Sample",
+        cell = function(value) htmltools::tags$a(
+          href = file.path("..", "output", "fastp", glue("{value}_fastp.html")), 
+          target = "_blank", 
+          value
+        ),
+        html = TRUE,
+        minWidth = 150,
+      ),
+      # total_reads = colDef(
+      #   name = "Total Reads", format = colFormat(separators = TRUE),
+      #   style = function(value) {
+      #     bar_style(width = 0.9 * value / max(.$total_reads), fill = "#B3B3B388")
+      #   },
+      # ),
+      mean_read_length = colDef(name = "Mean Read Length", maxWidth = 180),
+      q30_rate = colDef(
+        name = "Q30 Rate", format = colFormat(percent = TRUE, digits = 1),
+      ),
+      gc_content = colDef(
+        name = "GC Content", format = colFormat(percent = TRUE, digits = 1)
+      ),
+      group = colDef(name = "Group"),
+      RIN = colDef(maxWidth = 80)
+    ),
+    defaultColDef = colDef(maxWidth = 150, minWidth = 100)
+  )
+# div(
+#   class = "table",
+#   div(
+#     class = "table-header",
+#     htmltools::tags$caption(
+#       htmltools::em(
+#         "Basic Summary of unprocessed sequencing libraries with links to the original fastp reports included."
+#       )
+#     )
+#   ),
+  tbl
+# )
+```
+
+There were three runs that had less than 10 million reads that passed the filtering (SRR15881908, SRR15881904, SRR15881897) which are noted as likely to be an issue in further analysis. All of these are follow-up cases for the T2D cohort. The fourth lowest with just over 10M reads after trimming was also a follow-up T2D case.  It seems that of the low values two subjects have low read totals across both timepoints, T2D case subject 4 and control subject 30.
+
+## Read Trimming 
+
+```{r tbl-trimming}
+tbl <- getModule(fpl, "Summary")$Filtering_result %>% 
+  mutate(
+    sample = str_remove_all(Filename, "_fastp.json"),
+    total  = total / 2
+  ) %>% 
+  dplyr::select(sample, result, total) %>% 
+  dplyr::filter(total > 0) %>% 
+  pivot_wider(names_from = "result", values_from = "total") %>% 
+  mutate(
+    before = rowSums(dplyr::select(., ends_with("reads"))),
+    prop = 1 - passed_filter_reads / before,
+  ) %>% 
+  dplyr::select(sample, before, prop, everything()) %>% 
+  reactable(
+    sortable = TRUE, resizable = TRUE,
+    showPageSizeOptions = FALSE,     
+    columns = list(
+      sample = colDef(name = "Sample", minWidth = 110),
+      before = colDef(name = "Before Trimming"),
+      prop = colDef(
+        name = "% Discarded", format = colFormat(percent = TRUE, digits = 1)
+      ),
+      passed_filter_reads = colDef(name = "After Trimming"),
+      low_quality_reads = colDef(name = "Low Quality", maxWidth = 120),
+      too_many_N_reads = colDef(name = "Too Many Ns", maxWidth = 120),
+      too_short_reads = colDef(name = "Too Short", maxWidth = 100)
+    ),
+    columnGroups = list(
+      colGroup(
+        name = "Totals", columns = c("before", "passed_filter_reads")
+      ),
+      colGroup(
+        name = "Discarded", 
+        columns =  c("low_quality_reads", "too_many_N_reads", "too_short_reads")
+      )
+    ),
+    defaultColDef = colDef(format = colFormat(separators = TRUE))
+  ) 
+# div(
+#   class = "table",
+#   div(
+#     class = "table-header",
+#     htmltools::tags$caption(
+#       htmltools::em(
+#         "Summary of read trimming including why reads were discarded"
+#       )
+#     )
+#   ),
+  tbl
+# )
+  
+  
+tbl_df <- getModule(fpl, "Summary")$Filtering_result %>% 
+  mutate(
+    sample = str_remove_all(Filename, "_fastp.json"),
+    total = total / 2
+  ) %>% 
+  dplyr::select(sample, result, total) %>% 
+  dplyr::filter(total > 0) %>% 
+  pivot_wider(names_from = "result", values_from = "total") %>% 
+  mutate(
+    before = rowSums(dplyr::select(., ends_with("reads"))),
+    prop = 1 - passed_filter_reads / before
+  ) %>% 
+  dplyr::select(sample, before, prop, everything()) %>%
+  as.data.frame() 
+write_tsv(tbl_df, "output/trimming_result.tsv")
+
+# Filter samples with less than 10 million reads after trimming
+low_read_samples <- tbl_df %>% 
+  filter(passed_filter_reads < 15000000) %>% 
+  select(sample)
+
+# Print the sample names
+print(low_read_samples$sample)
+
+# Calculate mean, median, and standard deviation of reads after trimming
+mean_reads_after_trimming <- mean(tbl_df$passed_filter_reads)
+median_reads_after_trimming <- median(tbl_df$passed_filter_reads)
+sd_reads_after_trimming <- sd(tbl_df$passed_filter_reads)
+min_reads_after_trimming <- min(tbl_df$passed_filter_reads)
+max_reads_after_trimming <- max(tbl_df$passed_filter_reads)
+
+# Create a summary table
+summary_table <- tibble(
+  Statistic = c("Mean", "Median", "Standard Deviation", "Minimum", "Maximum"),
+  Value = c(mean_reads_after_trimming, median_reads_after_trimming, sd_reads_after_trimming, min_reads_after_trimming, max_reads_after_trimming)
+)
+
+# Print the summary table
+print(summary_table)
+
+# Pivot the summary table to wide format
+summary_table <- summary_table %>%
+  pivot_wider(names_from = Statistic, values_from = Value)
+
+# Write the summary table to a TSV file
+write_tsv(summary_table, "output/fastp/summary_statistics.tsv")
+
+# Print the results
+print(mean_reads_after_trimming)
+print(median_reads_after_trimming)
+print(sd_reads_after_trimming)
+
+
+
+# Perform data manipulation
+tbl <- getModule(fpl, "Summary")$Filtering_result %>% 
+  mutate(
+    sample = str_remove_all(Filename, "_fastp.json"),
+    total  = total / 2
+  ) %>% 
+  dplyr::select(sample, result, total) %>% 
+  dplyr::filter(total > 0) %>% 
+  pivot_wider(names_from = "result", values_from = "total") %>% 
+  mutate(
+    before = rowSums(dplyr::select(., ends_with("reads"))),
+    prop = 1 - passed_filter_reads / before,
+  ) %>% 
+  dplyr::select(sample, before, prop, everything())
+
+# Retain original column names as per reactable settings
+original_colnames <- c("Sample", "Before Trimming", "% Discarded", "After Trimming", 
+                       "Low Quality", "Too Many Ns", "Too Short")
+
+# Rename columns to match original names
+colnames(tbl) <- original_colnames
+
+# Define file path for CSV export
+csv_file <- "path/to/your/table_data.csv"  # Replace with your desired file path and name
+
+# Write data frame to CSV file
+write.csv(tbl, "../star_t2d/analysis/trimming_qc_figures/trimmingtable.csv")
+
+tbl_long <- tbl %>% 
+  pivot_longer(cols = c(`Before Trimming`, `% Discarded`, `After Trimming`, 
+                        `Low Quality`, `Too Many Ns`, `Too Short`),
+               names_to = "Category", values_to = "Value")
+
+ggplot(tbl_long, aes(x = Sample, y = Category, fill = Value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(x = "Sample", y = "Category", fill = "Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+```{r graph-trimming}
+
+
+```
+
+## De-Duplication
+
+```{r tbl-dedup}
+# Issue with div adding headers to tables
+tbl <- getModule(fpl, "Duplication") %>%
+  dplyr::select(Filename, rate) %>% 
+  left_join(
+    getModule(fpl, "Summary")$After_filtering %>% 
+      mutate(retained = total_reads / 2) %>% 
+      dplyr::select(Filename, retained)
+  ) %>% 
+  left_join(
+    getModule(fpl, "Summary")$Filtering_result %>% 
+      dplyr::filter(result == "passed_filter_reads") %>% 
+      mutate(after_trimming = total / 2) %>% 
+      dplyr::select(Filename, after_trimming)
+  ) %>% 
+  left_join(
+    readTotals(fpl)
+  ) %>% 
+  mutate(
+    sample = str_remove_all(Filename, "_fastp.json")
+  ) %>% 
+  dplyr::select(sample, Total_Sequences, after_trimming, retained, rate) %>% 
+  mutate(lost = 1 - retained / Total_Sequences) %>% 
+  reactable(
+    sortable = FALSE, resizable = TRUE,
+    showPageSizeOptions = FALSE,  
+    columns = list(
+      sample = colDef(name = "Sample"),
+      Total_Sequences = colDef(
+        name = "Before Trimming", format = colFormat(separators = TRUE),
+        minWidth = 120
+      ),
+      after_trimming = colDef(
+        name = "After Trimming", format = colFormat(separators = TRUE),
+        minWidth = 120
+      ),
+      retained = colDef(
+        name = "After De-Duplication", 
+        format = colFormat(separators = TRUE, digits = 0),
+        minWidth = 130
+      ),
+      rate = colDef(
+        "Duplication", format = colFormat(percent = TRUE, digits = 1),
+        maxWidth = 100
+      ),
+      lost = colDef(
+        name = "Total Loss", format = colFormat(percent = TRUE, digits = 1),
+        maxWidth = 100
+      )
+    ),
+    columnGroups = list(
+      colGroup(
+        name = "Read Totals",
+        columns = c("Total_Sequences", "after_trimming", "retained")
+      ),
+      colGroup(
+        name = "Rates",
+        columns = c("rate", "lost")
+      )
+    )
+  )
+# div(
+#   class = "table",
+#   div(
+#     class = "table-header",
+#     htmltools::tags$caption(
+#       htmltools::em(
+#         "Summary of final reads retained after trimming and deduplication"
+#       )
+#     )
+#   ),
+  tbl
+# )
+```
+
+## Insert Sizes
+
+```{r tbl-insert-size}
+
+tbl <- getModule(fpl, "Insert") %>% 
+  mutate(
+    sample = str_remove(Filename, "_fastp.json"),
+    prop_overlapping = 1 - unknown_rate
+  ) %>% 
+  unnest(histogram) %>% 
+  mutate(
+    cum_freq = cumsum(freq), .by = sample
+  ) %>% 
+  dplyr::filter(cum_freq < 0.5, freq != 0) %>% 
+  summarise(
+    peak = median(peak),
+    prop_overlapping = median(prop_overlapping),
+    med_insert_size = max(insert_size),
+    .by = sample
+  ) %>% 
+  mutate(
+    med_insert_size = ifelse(
+      prop_overlapping < 0.5, 
+      paste0(">", med_insert_size), as.character(med_insert_size)
+    )
+  ) %>% 
+  left_join(samples, by = "sample") %>% 
+  dplyr::select(
+    sample, disease_state, peak, med_insert_size, prop_overlapping
+  ) %>%  
+  reactable(
+    sortable = TRUE, resizable = TRUE,
+    showPageSizeOptions = FALSE,  
+    columns = list(
+      sample = colDef(name = "Sample"),
+      disease_state = colDef(name = "Disease State"),
+      peak = colDef(name = "Peak Insert Size"),
+      med_insert_size = colDef(name = "Median Insert Size"),
+      prop_overlapping = colDef(
+        name = "% Overlapping Inserts",
+        format = colFormat(percent = TRUE, digits = 1)
+      )
+    )
+  )
+# div(
+#   class = "table",
+#   div(
+#     class = "table-header",
+#     htmltools::tags$caption(
+#       htmltools::em(
+#         "Summary of insert sizes. For libraries where < 50% of reads overlapped, the median insert size is a lower limit"
+#       )
+#     )
+#   ),
+  tbl
+
+```
+Notes: for a group of samples peak insert 149 & Median >199, why is this?
+
+## Overrepresented Sequences
+
+
+```{r tbl-overrep-seq}
+df <- getModule(fpl, "After_filtering") %>% 
+  bind_rows(.id = "reads") %>% 
+  dplyr::select(ends_with("Name"), reads, starts_with("over")) %>% 
+  unnest(starts_with("over")) %>% 
+  summarise(
+    n = dplyr::n(),
+    total_count = sum(count),
+    max_count = max(count),
+    ave_rate = mean(rate),
+    .by = c(sequence, reads)
+  ) %>% 
+  arrange(desc(n), desc(ave_rate)) %>% 
+  dplyr::filter(n == length(fpl) / 2, max_count > 5e2) 
+df %>% 
+  mutate(
+    nm = glue("> n = {n}; total = {total_count}; rate = {percent(ave_rate)}"),
+    sequence = setNames(sequence, nm)
+  ) %>% 
+  pull(sequence) %>% 
+  as("DNAStringSet") %>% 
+  writeXStringSet(
+    here::here("output", "fastp", "top_overrep.fa")
+  )
+tbl <- reactable(
+  df,    
+  sortable = FALSE, resizable = TRUE,
+  showPageSizeOptions = FALSE,
+  columns = list(
+    sequence = colDef(
+      name = "Sequence", minWidth = 360
+    ),
+    reads = colDef(name = "Reads", maxWidth = 75),
+    n = colDef(name = "Libraries", maxWidth = 80),
+    total_count = colDef(
+      "Total Reads", format = colFormat(separators = TRUE), maxWidth = 100
+    ),
+    max_count = colDef(
+      "Largest Library", format = colFormat(separators = TRUE), maxWidth = 100
+    ),
+    ave_rate = colDef(
+      name = "Average Occurence (%)",
+      format = colFormat(percent = TRUE, digits = 4), maxWidth = 100
+    )
+  )
+)
+# div(
+#   class = "table",
+#   div(
+#     class = "table-header",
+#     htmltools::tags$caption(
+#       htmltools::em(
+#         "Over-represented sequences found in every library in > 10000 reads."
+#       )
+#     )
+#   ),
+  tbl
+# )
+```
+
+A manual BLAST analysis of the over-represented reads detected above showed all were _____ .
+
+# QC Figures {.tabset}
+
+## Insert Size
+
+As shown in the previous table, samples `r pander(samples$sample[1:2])` have noticeably larger insert sizes than the remaining samples, with > 50% of reads not overlapping.
+
+```{r plot-insert-size, fig.cap = "*A) Frequency and B) Cumulative Distributions of insert sizes across all samples.*"}
+# doesn't work with current ngsReports (bioconda versin)
+A <- plotInsertSize(fpl, plotType = "l") 
+B <- plotInsertSize(fpl, plotType = "c") 
+A + plot_layout(guides = "collect") + plot_annotation(tag_levels = "A") &
+  theme(legend.position = "bottom")
+```
+
+```{r clustered-insert-size}
+plotInsertSize(fpl, cluster = TRUE, usePlotly = TRUE)
+```
+I am not really sure how to interpret the insert size heat map
+
+
+## GC Content
+
+```{r plot-gc-resid, fig.cap = "*Residuals for GC content, found by taking the average across all samples.*"}
+A <- plotSeqContent(
+  fpl, plotType = "res", reads = "read1", bases = "GC"
+) +
+  geom_hline(yintercept = 0, linetype = 2)
+B <- plotSeqContent(
+  fpl, plotType = "res", reads = "read2", bases = "GC"
+) +
+  geom_hline(yintercept = 0, linetype = 2)
+A + B + 
+  plot_layout(guides = "collect", axis_titles = "collect") &
+  theme(legend.position = "none")
+```
+
+Inspecting GC content using residuals, calculated by taking the average across all samples, we can see the abnormal sample(s) in Read 1 group and also higher GC content for several samples in both groups.
+
+## Base Qualities
+
+```{r plot-base-quals, fig.cap = "*Average base quality scores by position in the read*"}
+fpl %>% 
+  lapply(plotBaseQuals, bases = c("A", "T", "C", "G")) %>% 
+  lapply(\(x) x$data) %>% 
+  bind_rows() %>% 
+  mutate(sample = str_remove_all(Filename, "_R[12].+")) %>% 
+  ggplot(aes(Position, Quality, colour = sample)) +
+  geom_line() +
+  facet_grid(rows = vars(Reads), cols = vars(Base)) +
+  # scale_colour_bodl() +
+  labs(colour = "Sample") +
+  theme(legend.position = "none")
+```
+
+Comparing the quality scores for each individual base supported the likelihood of the increased GC content skewing base quality scores.
+
+
+
+
+# References
+
+<div id="refs"></div>
+
+<br>
+<button type="button" class="btn btn-default btn-sessioninfo" data-toggle="collapse" data-target="#sessioninfo" style="display: block;">
+<span class="glyphicon glyphicon-info-sign" aria-hidden="true"></span> Session information
+</button>
+</p>
+<div id="sessioninfo" class="collapse">
+```{r session-info, echo=FALSE}
+pander::pander(sessionInfo())
+```
+</div>

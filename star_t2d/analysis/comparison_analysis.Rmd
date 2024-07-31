@@ -1,0 +1,417 @@
+---
+title: "alignment stats"
+author: "Monica Guilhaus"
+date: "2024-06-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(magrittr)
+library(dplyr)
+library(tidyverse)
+```
+
+```{r import_data}
+# Sample names
+sample_names <- c("SRR15881878", "SRR15881903", "SRR15881925", "SRR15881958")
+
+file_paths <-  paste0("/Users/monicaguilhaus/Documents/CloudDocuments/UNI/ResearchProject/vgrna_t2d/output/stats/mapstats/vcf_fa_build/", sample_names, ".map.tsv")
+linear_paths <- paste0("/Users/monicaguilhaus/Documents/CloudDocuments/UNI/ResearchProject/star_t2d/output/star/", sample_names, "_samtools.flagstat")
+
+```
+
+```{r graph_data_import}
+# file_path <- "output/stats/mapstats/vcf_fa_build/SRR15881878.map.tsv"
+# 
+# # Read the data, split the V1 column into two columns at the ":" delimiter, and store the result in SRR15881878
+# SRR15881878 <- read.table(file_path, sep = "\t", header = FALSE,
+#                           stringsAsFactors = FALSE, colClasses = "character") %>%
+#   as.data.frame() %>%
+#   mutate(V1 = gsub("^\\d+\\s+", "", V1)) %>%
+#   separate(V1, into = c("Metric", "SRR15881878"), sep = ":", extra = "merge")
+
+
+# Function to read and process each file
+process_file <- function(file_path) {
+  read.table(file_path, sep = "\t", header = FALSE, 
+             stringsAsFactors = FALSE, colClasses = "character") %>% 
+    as.data.frame() %>%
+    mutate(V1 = gsub("^\\d+\\s+", "", V1)) %>% 
+    separate(V1, into = c("Metric", "Value"), sep = ":", extra = "merge")
+}
+
+# List to store the processed data frames
+processed_data <- list()
+
+# Loop over each file path, read and process the data, and store the result
+for (file_path in file_paths) {
+  sample_name <- gsub(".*/|\\.map\\.tsv", "", file_path)  # Extract sample name from file path
+  processed_data[[sample_name]] <- process_file(file_path)
+}
+
+# This gives me a list object with the metrics and vals for each sample
+# Now I want this as a single dataframe
+
+# Join all processed data frames by the "Metric" column
+graph_data <- Reduce(function(x, y) left_join(x, y, by = "Metric"), processed_data)
+
+# Rename the columns to match the sample names
+colnames(graph_data)[-1] <- gsub("Value", "", names(processed_data))
+
+
+```
+
+
+```{r linear_data_import}
+# file_path <- "../star_t2d/output/star/SRR15881903_samtools.flagstat"
+# 
+# # Read the data, split the V1 column into two columns at the ":" delimiter, and store the result in SRR15881878
+# SRR15881903 <- read.table(file_path, sep = "\t", header = FALSE,
+#                           stringsAsFactors = FALSE, colClasses = "character") #%>%
+#   as.data.frame() %>%
+#   separate(V1, into = c("Value", "Metric"), sep = " \\+ ", extra = "merge") %>%
+#   mutate(Metric = str_replace(Metric, "^0 ", ""))   
+
+
+
+# Function to read and process each file
+process_file <- function(file_path) {
+  read.table(file_path, sep = "\t", header = FALSE, 
+             stringsAsFactors = FALSE, colClasses = "character") %>% 
+    as.data.frame() %>%
+    separate(V1, into = c("Value", "Metric"), sep = " \\+ ", extra = "merge") %>%
+    mutate(Metric = str_replace(Metric, "^0 ", "")) %>% 
+    separate(Metric, into = c("Metric", "Extra_Info"), sep = "\\(", extra = "merge") %>% 
+    select(Metric, Value, Extra_Info)
+}
+
+# List to store the processed data frames
+processed_data <- list()
+
+# Loop over each file path, read and process the data, and store the result
+for (file_path in linear_paths) {
+  sample_name <- gsub(".*/|_samtools\\.flagstat", "", file_path)  # Extract sample name from file path
+  processed_data[[sample_name]] <- process_file(file_path)
+}
+
+# Function to rename the extra info column in each processed dataframe
+rename_extra_info <- function(processed_data) {
+  for (sample_name in names(processed_data)) {
+    extra_info_col <- paste0(sample_name, "_extra")
+    colnames(processed_data[[sample_name]])[3] <- extra_info_col
+  }
+  return(processed_data)
+}
+
+# Rename the extra info column in each processed dataframe
+processed_data <- rename_extra_info(processed_data)
+
+# Function to rename the "Value" column in each processed dataframe
+rename_value_column <- function(processed_data) {
+  for (sample_name in names(processed_data)) {
+    value_col <- paste0(sample_name)
+    colnames(processed_data[[sample_name]])[2] <- value_col
+  }
+  return(processed_data)
+}
+
+# Rename the "Value" column in each processed dataframe
+processed_data <- rename_value_column(processed_data)
+
+# Join all processed data frames by the "Metric" column with left join
+linear_data_extra <- Reduce(function(x, y) {
+  left_join(x, y, by = "Metric")
+}, processed_data)
+
+# Remove the _extra columns from the merged dataframe
+linear_data <- linear_data_extra %>%
+  select(-ends_with("_extra"))
+
+```
+
+```{r plot_graph}
+# I dont think this is the right way to go. Need to wrangle.
+# Filter the graph_data for the desired metrics
+desired_metrics <- c("Total alignments", "Total primary", "Total secondary", "Total aligned", 
+                     "Total perfect", "Total gapless (softclips allowed)", "Total paired", 
+                     "Total properly paired")
+
+graph_data_filtered <- graph_data %>%
+  filter(Metric %in% desired_metrics)
+
+# Calculate the percentage for each metric relative to the total alignments for each sample
+percentage_data <- graph_data_filtered
+
+# Convert numeric columns to numeric type
+graph_data_filtered[, -1] <- lapply(graph_data_filtered[, -1], function(x) as.numeric(trimws(x)))
+
+# # Calculate the percentage for each metric relative to the total alignments for each sample
+# percentage_data <- graph_data_filtered
+# for (i in 2:ncol(percentage_data)) {
+#   percentage_data[, i] <- (percentage_data[, i] / percentage_data$SRR15881878) * 100
+# }
+
+
+# Calculate the percentage of each metric relative to the total alignments for each sample
+graph_data_percentage <- graph_data_filtered %>%
+  pivot_longer(cols = -Metric, names_to = "Sample", values_to = "Value") %>%
+  mutate(Value = as.numeric(Value)) %>%
+  group_by(Sample) %>%
+  mutate(Percentage = Value / sum(Value) * 100)
+# 
+# # Plot the data with stacked bars
+# ggplot(graph_data_percentage, aes(x = Sample, y = Percentage, fill = Metric)) +
+#   geom_bar(stat = "identity") +
+#   labs(title = "Percentage of Metrics Relative to Total Alignments by Sample",
+#        x = "Sample", y = "Percentage of Total Alignments") +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# 
+# # Filter out the "Total alignments" metric
+# graph_data_percentage_filtered <- graph_data_percentage %>% 
+#   filter(Metric != "Total alignments")
+# 
+# # Plot the data with stacked bars
+# ggplot(graph_data_filtered, aes(x = Sample, y = Value, fill = Metric)) +
+#   geom_bar(stat = "identity") +
+#   geom_text(aes(label = paste0(Percentage, "%")), 
+#             position = position_stack(vjust = 0.5), size = 3) +
+#   labs(title = "Metrics Relative to Total Alignments by Sample",
+#        x = "Sample", y = "Total Alignments") +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# 
+# Plot the data with stacked bars
+ggplot(graph_data_percentage, aes(x = Sample, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", data = subset(graph_data_percentage, Metric != "Total alignments")) +
+  geom_text(aes(label = sprintf("%.1f%%", Percentage)),
+            position = position_stack(vjust = 0.5), size = 3) +
+  labs(title = "Graph",
+       x = "Sample", y = "Total Alignments") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme_bw()
+```
+```{r}
+# Plot the data with stacked bars
+ggplot(graph_data_percentage, aes(x = Value, y = Percentage, fill = Metric)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Percentage of Metrics Relative to Total Alignments by Sample",
+       x = "Total Alignments", y = "Percentage of Total Alignments") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r attempt2_graph_data_plot}
+# Define the metrics of interest
+metrics_of_interest <- c(
+  "Total primary",
+  "Total secondary",
+  "Total aligned",
+  "Total perfect",
+  "Total gapless (softclips allowed)",
+  "Total paired",
+  "Total properly paired"
+)
+
+# Identify columns that start with "SRR"
+srr_columns <- grep("^SRR", names(graph_data_filtered), value = TRUE)
+
+# Convert identified columns to numeric
+graph_data_filtered[, srr_columns] <- lapply(graph_data_filtered[, srr_columns], as.numeric)
+
+
+# Filter and summarize the data
+sums <- graph_data_filtered %>%
+  filter(Metric %in% metrics_of_interest) %>%
+  summarise(across(starts_with("SRR"), sum))
+
+# View the result
+print(sums)
+
+
+```
+
+
+```{r plot_linear}
+
+# Assuming linear_data is your dataframe
+# New desired metrics
+desired_metrics <- c("in total", "primary", "secondary", "paired in sequencing", "mapped", "primary mapped", "properly paired")
+
+# Trim whitespace from Metric column
+linear_data$Metric <- trimws(linear_data$Metric)
+
+# Subset the data for the desired metrics
+linear_data_filtered <- linear_data %>%
+  filter(Metric %in% desired_metrics)
+
+# Convert numeric columns to numeric type
+linear_data_filtered[, -1] <- lapply(linear_data_filtered[, -1], function(x) as.numeric(trimws(x)))
+
+# Calculate the percentage of each metric relative to the total alignments for each sample
+linear_data_percentage <- linear_data_filtered %>%
+  pivot_longer(cols = -Metric, names_to = "Sample", values_to = "Value") %>%
+  mutate(Value = as.numeric(Value)) %>%
+  group_by(Sample) %>%
+  mutate(Percentage = Value / sum(Value) * 100)
+
+# Rename the metrics
+linear_data_percentage <- linear_data_percentage %>%
+  mutate(Metric = recode(Metric,
+                         "in total" = "Total alignments",
+                         "primary" = "Total primary",
+                         "secondary" = "Total secondary",
+                         "mapped" = "Total aligned",
+                         "primary mapped" = "Total primary mapped",
+                         "paired in sequencing" = "Total paired",
+                         "properly paired" = "Total properly paired"))
+
+# Plot the data with stacked bars
+ggplot(linear_data_percentage, aes(x = Sample, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", data = subset(linear_data_percentage, Metric != "Total alignments")) +
+  geom_text(aes(label = sprintf("%.1f%%", Percentage)),
+            position = position_stack(vjust = 0.5), size = 3) +
+  labs(title = "Linear",
+       x = "Sample", y = "Total Alignments") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme_bw()
+
+
+
+```
+
+```{r linear_data_addinfo}
+# Add inout data to a combined lin data map sats
+input_reads_df <- alnsubset_df %>%
+  select(Sample, Number_Of_Input_Reads) %>%
+  column_to_rownames(var = "Sample")
+
+  new_row <- input_reads_df 
+  new_row <- new_row %>% rownames_to_column(var = "Sample") 
+  new_row <- pivot_wider(new_row, names_from = Sample, values_from = Number_Of_Input_Reads)
+  new_row$Metric <- "Number_Of_Input_Reads"                                   
+
+new_row <- new_row %>% select(Metric, everything())  
+
+# Combine the dataframes row-wise
+combined_comp <- bind_rows(linear_data, new_row)
+
+# Print the combined dataframe
+print(combined_comp)
+
+```
+```{r}
+# Plot side by side prim, sec, and input
+
+# whitespace to _
+combined_comp$Metric <- str_replace_all(combined_comp$Metric, "\\s+", "_")
+
+# Filter data for only the required metrics
+filtered_data <- combined_comp %>%
+  filter(Metric %in% c("Number_Of_Input_Reads", "primary_mapped_", "secondary"))
+
+# Reshape data for plotting (convert to long format)
+filtered_data_long <- filtered_data %>%
+  pivot_longer(cols = starts_with("SRR"), 
+               names_to = "Sample", 
+               values_to = "Value")
+
+
+# Plot using ggplot2
+ggplot(filtered_data_long, aes(x = Sample, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9), width = 0.7) +
+  labs(x = "Samples", y = "Counts", title = "Metrics by Sample") +
+  scale_fill_manual(values = c("Number_Of_Input_Reads" = "#1f78b4", "primary" = "#33a02c", "secondary" = "#e31a1c")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# reads are being seen as pairs in input but not in alignments
+# half them
+filtered_data_modified <- filtered_data_long
+
+filtered_data_modified$Value[filtered_data_modified$Metric %in% c("primary_mapped_", "secondary")] <- 
+  filtered_data_modified$Value[filtered_data_modified$Metric %in% c("primary_mapped_", "secondary")] / 2
+
+### This is the final one for linear 
+# Plot using ggplot2
+ggplot(filtered_data_modified, aes(x = Sample, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9), width = 0.7) +
+  labs(x = "Samples", y = "Counts", title = "Metrics by Sample") +
+  scale_fill_manual(values = c("Number_Of_Input_Reads" = "#1f78b4", "primary_mapped_" = "#33a02c", "secondary" = "#e31a1c")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r add_graph_stats_and_plot_again}
+# ensure metrics are labeld as linear
+combined_comp$Metric <- paste0("linear_", combined_comp$Metric)
+
+
+graph_data_filtered <- graph_data %>%
+  filter(Metric %in% desired_metrics)
+# make all ws _
+graph_data_filtered$Metric <- str_replace_all(graph_data_filtered$Metric,  "\\s+", "_") 
+graph_data_filtered$Metric <- paste0("graph_", graph_data_filtered$Metric)
+
+# combine 
+combined_comp <- rbind(combined_comp, graph_data_filtered)
+
+# remove whitespace 
+combined_comp <- combined_comp %>% mutate(across(everything(), ~trimws(as.character(.))))
+
+
+# Filter data for only the required metrics
+filtered_data <- combined_comp %>%
+  filter(Metric %in% c("linear_Number_Of_Input_Reads", "linear_primary_mapped", "linear_secondary", "graph_Total_aligned", "graph_Total_secondary"))
+
+write_csv(filtered_data, "alignmentnumbers.csv")
+
+# Reshape data for plotting (convert to long format)
+filtered_data_long <- filtered_data %>%
+  pivot_longer(cols = starts_with("SRR"), 
+               names_to = "Sample", 
+               values_to = "Value") %>% mutate(Value = as.numeric(Value))
+
+# reads are being seen as pairs in input but not in alignments
+# half them
+filtered_data_modified <- filtered_data_long
+# lin
+# filtered_data_modified$Value[filtered_data_modified$Metric %in% c("linear_primary_mapped_", "linear_secondary")] <- 
+#   filtered_data_modified$Value[filtered_data_modified$Metric %in% c("linear_primary_mapped_", "linear_secondary")] / 2
+# # graph
+# filtered_data_modified$Value[filtered_data_modified$Metric %in% c("graph_Total_aligned", "graph_Total_secondary")] <- 
+#   filtered_data_modified$Value[filtered_data_modified$Metric %in% c("graph_Total_aligned", "graph_Total_secondary")] / 2
+
+# OR 
+filtered_data_modified$Value[filtered_data_modified$Metric %in% c("linear_Number_Of_Input_Reads")] <- 
+  filtered_data_modified$Value[filtered_data_modified$Metric %in% c("linear_Number_Of_Input_Reads")] * 2
+
+# plot
+ggplot(filtered_data_modified, aes(x = Sample, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9), width = 0.7) +
+  labs(x = "Samples", y = "Number of Reads") +
+  scale_fill_manual(values = c("linear_Number_Of_Input_Reads" = "#BB3481", "linear_primary_mapped" = "deepskyblue4", 
+                               "graph_Total_aligned" = "darkorange3", "linear_secondary" = "aquamarine3", "graph_Total_secondary" = "orange"),
+                    labels = c("Graph - Primary Mapped","Graph - Secondary", "Number of Input Reads", "Linear - Primary Mapped",
+                               "Linear - Secondary"), name = NULL) +
+  scale_x_discrete(labels = c("SRR15881878" = "T2D - baseline",
+                              "SRR15881903" = "T2D - follow-up",
+                              "SRR15881925" = "Control - baseline",
+                              "SRR15881958" = "Control - follow-up")) +
+  scale_y_continuous(labels = scales::comma) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10, angle = 0, hjust = 0.5),
+        axis.text.y = element_text(size = 10), 
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        legend.text = element_text(size = 10),  
+        legend.position = c(0.8,0.8),
+        legend.background = element_rect(colour = "black", fill = "white", size = 0.3), 
+        plot.subtitle = element_text(size = 12, hjust = 0.5))
+
+```
+
+
+
+

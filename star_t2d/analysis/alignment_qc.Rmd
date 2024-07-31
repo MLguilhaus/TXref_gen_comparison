@@ -1,0 +1,201 @@
+---
+title: "alignment_qc"
+author: "Monica Guilhaus"
+date: "2024-05-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r packages}
+library(tidyverse)
+library(ngsReports)
+library(yaml)
+library(pander)
+library(glue)
+library(scales)
+library(reactable)
+library(htmltools)
+library(Biostrings)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+panderOptions("big.mark", ",")
+panderOptions("table.split.table", Inf)
+theme_set(theme_bw() + theme(legend.position = "none"))
+```
+
+```{r import_starlogs}
+# How to do this for all alignments?
+
+# Something like this? Unsure if most streamline way. 
+
+#Define path and files
+path <- "/Users/monicaguilhaus/Documents/CloudDocuments/UNI/ResearchProject/star_t2d/output/star"
+file_list <- list.files(path = path, pattern = "_Log.final.out", full.names = TRUE)
+
+# Create empty list
+df_list <- list()
+
+# Loop through each file
+for (file in file_list) {
+  # Import the log file
+  df <- importNgsLogs(file, type = "star")
+  # Add the data frame to the list
+  df_list[[file]] <- df
+}
+
+# Combine all data frames into one
+combined_df <- do.call(rbind, df_list) 
+
+# Remove unnecsary features
+rownames(combined_df) <- NULL
+combined_df$Filename <- gsub("_Log.final.out", "", combined_df$Filename)
+
+# Renmae column to mathc other data
+combined_df <- combined_df %>% 
+  rename(Sample = Filename)
+
+```
+```{r quickviz_uniq}
+#quick look at unique maps for all samples
+plotAlignmentSummary(file_list, type = "star") + theme(axis.text.y = element_blank())
+
+```
+```{r}
+# Lets make this look better
+
+combined_df <- combined_df %>%
+  left_join(linear_metadata[, c("Sample", "group")], by = "Sample")
+
+
+# Select only the relevant columns
+selected_df <- combined_df %>%
+  select(Sample, Number_Of_Reads_Mapped_To_Too_Many_Loci, 
+         Number_Of_Reads_Mapped_To_Multiple_Loci, 
+         Uniquely_Mapped_Reads_Number, 
+         Number_Of_Reads_Unmapped_Other, group)
+
+write_csv(selected_df, file = "linear_mapstats.csv")
+
+# Reshape the data from wide to long format
+long_df <- selected_df %>%
+  pivot_longer(
+    cols = c("Number_Of_Reads_Mapped_To_Too_Many_Loci", 
+             "Number_Of_Reads_Mapped_To_Multiple_Loci", 
+             "Uniquely_Mapped_Reads_Number", 
+             "Number_Of_Reads_Unmapped_Other"),
+    names_to = "Type",
+    values_to = "Count"
+  )
+leg <- c( "Mapped - Multiple Loci", "Mapped - Too Many Loci", "Unmapped Other",
+          "Uniquely Mapped"
+          )
+
+
+# Create a new column to label samples with the group number
+long_df <- long_df %>%
+  mutate(SampleLabel = as.factor(group))
+
+colours2 <- c("orange", "darkorange3", "aquamarine3", "deepskyblue4")
+
+# Create a stacked bar plot
+ggplot(long_df, aes(x = Count, y = Sample, fill = Type)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Total Reads", y = "Samples", fill = "Type") + 
+  theme(axis.text.y = element_blank(), legend.position = "bottom") +
+  scale_fill_manual(labels = leg, values = colours2, name = NULL) + 
+  scale_x_continuous(labels = scales::comma, expand = expansion(c(0, 0.05)))
+
+ggplot(long_df, aes(x = Count, y = Sample, fill = Type)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Total Reads", y = "Samples", fill = "Type") + 
+  theme(legend.position = "bottom") +
+  scale_fill_manual(labels = leg, values = colours2, name = NULL) + 
+  scale_x_continuous(labels = scales::comma, expand = expansion(c(0, 0.05)))
+
+
+  
+```
+```{r}
+combined_df$Sample[combined_df$Uniquely_Mapped_Reads < 10000000]
+
+# Create a new data frame with 'Sample' and the required columns
+map_df <- data.frame(
+  Sample = combined_df$Sample,
+  Number_Of_Reads_Mapped_To_Too_Many_Loci = combined_df$Number_Of_Reads_Mapped_To_Too_Many_Loci,
+  Number_Of_Reads_Mapped_To_Multiple_Loci = combined_df$Number_Of_Reads_Mapped_To_Multiple_Loci,
+  Uniquely_Mapped_Reads_Number = combined_df$Uniquely_Mapped_Reads_Number
+)
+
+# Create a new column for the total mapped reads
+map_df$Total_Mapped <- rowSums(map_df[, c("Number_Of_Reads_Mapped_To_Too_Many_Loci",
+                                          "Number_Of_Reads_Mapped_To_Multiple_Loci",
+                                          "Uniquely_Mapped_Reads_Number")])
+
+# Calculate mean, median, and standard deviation of reads after trimming
+mean_reads_align <- mean(map_df$Total_Mapped)
+median_reads_align <- median(map_df$Total_Mapped)
+sd_reads_align <- sd(map_df$Total_Mapped)
+min_reads_align <- min(map_df$Total_Mapped)
+max_reads_align <- max(map_df$Total_Mapped)
+
+# Create a summary table
+summary_table_totalaln <- tibble(
+  Statistic = c("Mean", "Median", "Standard Deviation", "Minimum", "Maximum"),
+  Value = c(mean_reads_align, median_reads_align, sd_reads_align, min_reads_align, max_reads_align)
+)
+
+mean_reads_align <- mean(map_df$Uniquely_Mapped_Reads_Number)
+median_reads_align <- median(map_df$Uniquely_Mapped_Reads_Number)
+sd_reads_align <- sd(map_df$Uniquely_Mapped_Reads_Number)
+min_reads_align <- min(map_df$Uniquely_Mapped_Reads_Number)
+max_reads_align <- max(map_df$Uniquely_Mapped_Reads_Number)
+
+# Create a summary table
+summary_table_uniqaln <- tibble(
+  Statistic = c("Mean", "Median", "Standard Deviation", "Minimum", "Maximum"),
+  Value = c(mean_reads_align, median_reads_align, sd_reads_align, min_reads_align, max_reads_align)
+)
+
+```
+
+```{r}
+# # Library size vs mapping totals 
+# map_df$lib.size <- LdgeList_Filtered$samples$lib.size
+# 
+# broom::tidy(lin_pca) %>% 
+#   dplyr::rename(sample = row) %>% 
+#   dplyr::filter(PC %in% 1:10) %>% 
+#   pivot_wider(names_from = "PC", values_from = "value", names_prefix = "PC") %>% 
+#   left_join(rownames_to_column(dge_subset$samples, "sample")) %>% # This data.frame probably has library sizes, disease status etc...
+#   dplyr::select(
+#     PC1, PC2, PC3, group, lib.size
+#   ) %>% 
+```
+```{r lib.size_investigation}
+# subset for sample_names
+# Subset combined_df to include only samples in sample_names
+alnsubset_df <- subset(combined_df, Sample %in% sample_names)
+
+input_reads_df <- alnsubset_df %>% 
+  select(Sample, Number_Of_Input_Reads)
+
+# Remove columns that need to be excluded before pivoting
+cols_to_keep <- setdiff(names(alnsubset_df), c("Started_Job_On", "Started_Mapping_On", "Finished_On", "Mapping_Duration"))
+df_filtered <- alnsubset_df[, cols_to_keep]
+
+df_long <- df_filtered %>%
+  pivot_longer(cols = -Sample,    # Columns to pivot (excluding 'Sample')
+               names_to = "Metric",  # New column for metric names
+               values_to = "Value") 
+
+# Pivot wider to transform into desired format
+df_wide <- df_long %>%
+  pivot_wider(names_from = Sample, values_from = Value)
+
+print(df_wide)
+```
+

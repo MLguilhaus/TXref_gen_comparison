@@ -1,0 +1,532 @@
+---
+title: "rpvgcounts"
+author: "Monica Guilhaus"
+date: "2024-06-07"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, echo=FALSE}
+library(limma)
+library(Glimma)
+library(edgeR)
+library(AnnotationHub)
+library(ensembldb)
+library(GenomicRanges)
+library(tidyverse)
+library(magrittr)
+library(scales)
+library(pander)
+library(ggrepel)
+library(RColorBrewer)
+library(rtracklayer)
+library(plyranges)
+```
+
+```{r import_data}
+files <- list.files("~/Documents/CloudDocuments/UNI/ResearchProject/star_t2d/output/counts_rpvg", pattern = "rpvg.txt", full.names = TRUE)
+counts_list <- lapply(files, read_tsv)
+names(counts_list) <- gsub("~/Documents/CloudDocuments/UNI/ResearchProject/star_t2d/output/counts_rpvg/|_rpvg.txt", "", files)
+```
+
+```{r import_metadata}
+# Import sample metadata
+metadata <- read_tsv("/Users/monicaguilhaus/Documents/LocalDocs/samples.tsv")
+
+# Check counts colnames and rename Run in metadata to id if needed
+table(colnames(gene_counts_filtered)==metadata$Run)
+
+# Reorder columns of gene_counts_filtered to match the order in metadata$Run
+gene_counts_filtered <- gene_counts_filtered[, metadata$Run]
+
+labels <- c("Control - Baseline", "Control - Follow-up", "T2D Case - Baseline", "T2D Case - Follow-up")
+
+```
+
+```{r}
+# Path to your data files
+data_path <- "/Users/monicaguilhaus/Documents/CloudDocuments/UNI/ResearchProject/star_t2d/output/counts_rpvg/"
+
+# # Function to read and process a single file
+# read_process_file <- function(file_path) {
+#   # Extract sample ID from file name
+#   sample_id <- basename(file_path)
+#   
+#   # Read the data
+#   df <- read_tsv(file_path)
+#   
+#   return(df)
+# }
+
+# Function to read and process a single file
+read_process_file <- function(file_path) {
+  # Extract sample ID from file name
+  sample_id <- basename(file_path)
+  
+  # Read the data
+  df <- read_tsv(file_path)
+
+  # # Extract the Name and ReadCount columns
+  # df <- select(df, Name, ReadCount)
+  # 
+  # # Rename the ReadCount column to include the sample ID
+  # colnames(df)[colnames(df) == "ReadCount"] <- paste0("ReadCount_", sample_id)
+  # 
+  # return(df)
+}
+
+# Get list of files
+file_list <- list.files(path = data_path, pattern = "SRR.*_rpvg\\.txt$", full.names = TRUE)
+
+# Read and process each file
+dfs <- lapply(file_list, read_process_file)
+
+# Merge dataframes
+final_df <- reduce(dfs, full_join, by = "Name")
+
+# View the final dataframe
+head(final_df)
+```
+
+```{r}
+# Path to the file
+file_path <- "/Users/monicaguilhaus/Documents/CloudDocuments/UNI/ResearchProject/star_t2d/output/counts_rpvg/SRR15881878_rpvg.txt"
+
+# Read the data
+SRR15881878 <- read_tsv(file_path) #%>%
+  
+SRR15881878 <- select(SRR15881878, -ClusterID, -Length, -EffectiveLength, -HaplotypeProbability, -TPM)
+head(SRR15881878)
+SRR15881878 <- rename(SRR15881878, SRR15881878 = ReadCount)
+
+```
+```{r}
+# Path to the file
+file_path <- "/Users/monicaguilhaus/Documents/CloudDocuments/UNI/ResearchProject/star_t2d/output/counts_rpvg/SRR15881903_rpvg.txt"
+
+# Read the data
+SRR15881903 <- read_tsv(file_path) #%>%
+  
+SRR15881903 <- select(SRR15881903, -ClusterID, -Length, -EffectiveLength, -HaplotypeProbability, -TPM)
+head(SRR15881903)
+SRR15881903 <- rename(SRR15881903, SRR15881903 = ReadCount)
+
+```
+
+
+```{r}
+# Path to the file
+file_path <- "/Users/monicaguilhaus/Documents/CloudDocuments/UNI/ResearchProject/star_t2d/output/counts_rpvg/SRR15881925_rpvg.txt"
+
+# Read the data
+SRR15881925 <- read_tsv(file_path) #%>%
+  
+SRR15881925 <- select(SRR15881925, -ClusterID, -Length, -EffectiveLength, -HaplotypeProbability, -TPM)
+head(SRR15881925)
+SRR15881925 <- rename(SRR15881925, SRR15881925 = ReadCount)
+
+```
+
+```{r}
+# Path to the file
+file_path <- "/Users/monicaguilhaus/Documents/CloudDocuments/UNI/ResearchProject/star_t2d/output/counts_rpvg/SRR15881958_rpvg.txt"
+
+# Read the data
+SRR15881958 <- read_tsv(file_path) #%>%
+  
+SRR15881958 <- select(SRR15881958, -ClusterID, -Length, -EffectiveLength, -HaplotypeProbability, -TPM)
+head(SRR15881958)
+SRR15881958 <- rename(SRR15881958, SRR15881958 = ReadCount)
+
+```
+```{r join}
+df_list <- list(SRR15881878, SRR15881903, SRR15881925, SRR15881958)
+
+txcounts <- left_join(SRR15881878, SRR15881903, by = "Name") %>% 
+  left_join(SRR15881925, by = "Name") %>% 
+  left_join(SRR15881958, by = "Name")
+
+head(txcounts)
+
+```
+```{r gtf}
+gtf <- import.gff("/Users/monicaguilhaus/Documents/LocalDocs/gencode.v45.primary_assembly.annotation.gtf")
+
+# Subset and select relevant columns
+gtf_subset <- gtf %>%
+  subset(type == "transcript") %>%
+  select(transcript_id, gene_id, gene_name) %>% mcols() %>% as.data.frame()
+
+# gtf_df <- gtf %>% mcols() %>% as.data.frame %>% distinct(transcript_id, gene_id, gene_name)
+
+# # Convert metadata to a data frame
+# gtf_df <- mcols(gtf_subset) %>% as.data.frame()
+# 
+# head(gtf_df)
+
+```
+
+```{r}
+# Remove haplotypes from transcript IDs
+txcounts_stripped <- txcounts %>%
+  mutate(Name_stripped = str_remove_all(Name, "_[HR][0-9]+$")) %>%
+  select(-Name) %>%
+  rename(Name = Name_stripped)
+
+# View the modified dataframe
+head(txcounts_stripped)
+txcounts_stripped %>% filter(is.na(Name))
+
+na_mapped <- mapped_counts %>% filter(is.na(gene_id))
+
+# Join txcounts_stripped with gtf_df to map transcripts to genes
+mapped_counts <- left_join(txcounts_stripped, gtf_subset, by = c("Name" = "transcript_id"))
+
+
+gene_counts <- mapped_counts %>%
+  group_by(gene_id) %>%
+  summarize(across(starts_with("SRR"), ~ sum(.x, na.rm = TRUE)))
+
+# View the resulting gene counts dataframe
+head(gene_counts)
+
+gene_counts %>% filter(is.na(gene_id))
+
+# Lots of transcrips without gene ID 
+transcripts_without_gene_id <- mapped_counts %>% filter(is.na(gene_id))
+
+num_transcripts_without_gene_id <- nrow(transcripts_without_gene_id)
+total_transcripts <- nrow(mapped_counts)
+percentage_missing <- (num_transcripts_without_gene_id / total_transcripts) * 100
+
+
+cat("Number of transcripts without gene IDs:", num_transcripts_without_gene_id, "\n")
+cat("Total number of transcripts:", total_transcripts, "\n")
+cat("Percentage of transcripts without gene IDs:", percentage_missing, "%\n")
+
+# Assuming SRR column names are known
+srr_columns <- c("SRR15881878", "SRR15881903", "SRR15881925", "SRR15881958")
+
+# Count rows where all SRR columns are zero
+num_no_srr_values <- na_mapped %>%
+  filter(rowSums(select(., all_of(srr_columns)) == 0) == length(srr_columns)) %>%
+  nrow()
+
+#  Get rid of the unknowns for now
+gene_counts_filtered <- gene_counts %>%
+  filter(!is.na(gene_id))
+
+# Replace NA gene_id with "Unknown" (did this after library sizes was small in dge)
+gene_counts <- gene_counts %>%
+  mutate(gene_id = ifelse(is.na(gene_id), "Unknown", gene_id))
+
+# unique_transcript_names <- unique(transcripts_without_gene_id$Name)
+# 
+# transcript_info <- gtf_subset %>% filter(transcript_id == "ENST00000330597.5")
+# transcript_info <- subset(gtf, mcols(gtf)$transcript_id == "ENST00000330597.5")
+# 
+# HBG <- subset(gtf, grepl("HBG", gene_name))
+
+
+gene_counts_filtered <- gene_counts_filtered %>%
+  as.data.frame() %>%
+  column_to_rownames("gene_id") %>%
+  set_colnames(
+    str_extract(colnames(.), "SRR[0-9]+")
+  )
+
+# (did this after library sizes was small in dge)
+
+gene_counts <- gene_counts %>%
+  as.data.frame() %>%
+  column_to_rownames("gene_id") %>%
+  set_colnames(
+    str_extract(colnames(.), "SRR[0-9]+")
+  )
+
+```
+
+```{r create DGE list}
+# Excl 'unknown
+dgeList <- gene_counts_filtered %>%
+    DGEList() %>%
+    calcNormFactors()
+
+dgeList$samples
+
+#Incl 'unknown'
+dgeList <- gene_counts %>%
+    DGEList() %>%
+    calcNormFactors()
+
+dgeList$samples
+```
+```{r add_metadataDGE}
+# # Create a group column 
+# metadata <- metadata %>% 
+#   mutate(group = case_when(
+#     disease_state == "control" & time == " baseline" ~ 1,
+#     disease_state == "control" & time == " follow-up" ~ 2,
+#     disease_state == "T2D case" & time == " baseline" ~ 3,
+#     disease_state == "T2D case" & time == " follow-up" ~ 4,
+#     TRUE ~ NA_integer_ 
+#     ))
+
+labels <- c("Control - Baseline", "Control - Follow-up", "T2D Case - Baseline", "T2D Case - Follow-up")
+
+
+# Add metadata group info to DGEList
+# Unsure if I should add both timepoint and disease state here
+group <- paste(metadata$group)
+
+# Convert to factor
+group <- factor(group)
+
+# Add the group information into the DGEList
+dgeList$samples$group <- group
+dgeList$samples
+
+```
+```{r add_gene_info}
+ah <- AnnotationHub()
+
+# Subest for humans
+ah <- ah %>% 
+  subset(species == "Homo sapiens") %>%
+  subset(rdataclass == "EnsDb")
+
+
+# Load the recent ensdb release
+ensDb <- ah[["AH113665"]]
+ensDb
+
+# Get g ranges 
+genesGR <- genes(ensDb) 
+
+# Get a warning for MT 
+# Remove some columns
+mcols(genesGR) <- mcols(genesGR)[c("gene_id", "gene_name", "gene_biotype", "entrezid")]
+
+mcols(genesGR)
+
+# Add to dge
+dgeList$genes <- genesGR[rownames(dgeList)]
+# Error: subscript contains invalid names
+
+
+#  Check the row names of dgeList
+print(rownames(dgeList))
+print(names(genesGR))
+
+# rownames are numbered in dge
+rownames(dgeList) <- rownames(gene_counts_filtered)
+
+# Remove the suffixes from the row names of dgeList
+dgeList_names <- sub("\\..*$", "", rownames(dgeList))
+
+rownames(dgeList) <-dgeList_names
+
+# Count the number of matching names between dgeList and genesGR
+num_matches <- length(intersect(dgeList_names, names(genesGR)))
+
+# Count the number of non-matching names
+num_non_matches <- length(dgeList_names) - num_matches
+
+# Print the counts of matches and non-matches
+print(paste("Number of matches:", num_matches))
+print(paste("Number of non-matches:", num_non_matches))
+
+# Find the matched row names between dgeList and genesGR
+matched_row_names <- intersect(dgeList_names, names(genesGR))
+
+# Subset genesGR using the matched row names
+matched_genesGR <- genesGR[matched_row_names]
+
+# Convert matched_genesGR to a DataFrame for easy merging
+matched_genesDF <- as.data.frame(matched_genesGR)
+
+# Match the row names between dgeList and matched_genesDF
+matched_indices <- match(matched_row_names, rownames(dgeList))
+
+# Add matched_genesDF to dgeList based on matched row names
+dgeList$genes <- matched_genesDF[matched_indices, ]
+
+head(dgeList$genes)
+
+```
+
+
+
+```{r filtering}
+# Undetectable
+dgeList$counts %>% 
+    rowSums() %>%
+    is_greater_than(0) %>%
+    table
+
+# Calc cpm (0.5 = ~ 15m reads aligning to a gene
+# two sample groups - sort of
+# Using 0.5 threshold instead of 1 
+dgeList %>% 
+  cpm() %>% 
+  is_greater_than(0.5) %>% 
+  rowSums() %>% 
+  is_weakly_greater_than(2) %>% 
+  table()
+
+# This is manual way of filtering
+genes2keep <- dgeList %>%
+  cpm() %>%
+  is_greater_than(1) %>%
+  rowSums() %>%
+  is_weakly_greater_than(2)
+
+genes2keep %>% 
+  cpm() %>% 
+  is_greater_than(1) %>% 
+  rowSums() %>% 
+  is_weakly_greater_than(2) %>% 
+  table()
+
+# I dont really understand why this retains the same number but changes the condition to all false...
+
+# Calc norm factors
+dgeList_Filtered <- dgeList[genes2keep,] %>%
+  calcNormFactors()
+
+dgeList_Filtered %>% 
+  cpm() %>% 
+  is_greater_than(1) %>% 
+  rowSums() %>% 
+  is_weakly_greater_than(2) %>% 
+  table()
+
+# I get it now... after that step
+
+```
+
+```{r compare_distribution}
+
+col <- brewer.pal(nrow(dgeList$samples), "Paired")
+par(mfrow = c(1,2))
+dgeList %>%
+    cpm(log = TRUE) %>%
+    plotDensities(legend = FALSE,
+                  main = "A. Before Filtering",
+                  col=col)
+dgeList_Filtered %>%
+    cpm(log = TRUE) %>%
+    plotDensities(legend = FALSE,
+                  main = "B. After Filtering",
+                  col=col)
+
+
+```
+
+```{r library_sizes}
+# would be great to overlay same samples from other counts here (linear vs graph)
+
+colours <- c("darkorange3", "orange", "deepskyblue4", "aquamarine3")
+dgeList_Filtered$samples %>%
+    ggplot(aes(group, lib.size, fill = group)) +
+    geom_boxplot() +
+    scale_y_continuous(labels = scales::comma) +
+    labs(x = "Group", y = "Library Size") +
+    scale_fill_manual(values = colours, labels = labels) +
+    theme_bw() 
+
+dgeList_Filtered$samples %>%
+  group_by(group) %>%
+  summarize(mean_lib_size = mean(lib.size)) %>%
+  ggplot(aes(x = group, y = mean_lib_size, fill = group)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = "Group", y = "Mean Library Size") +
+  scale_fill_manual(values = colours, labels = labels) +
+  theme_bw()
+
+```
+```{r PCA}
+
+rpvg_pca <- dgeList_Filtered %>%
+    cpm(log = TRUE) %>%
+    t() %>%
+    prcomp() 
+
+summary(rpvg_pca)$importance %>%
+  pander(split.tables = Inf)
+
+rpvg_pca$x %>%
+        as.data.frame() %>%
+        rownames_to_column("sample") %>%
+        as_tibble() %>%
+        dplyr::select(sample, PC1, PC2) %>%
+        left_join(rownames_to_column(dgeList_Filtered$samples, "sample")) %>%
+        ggplot(aes(x = PC1, y = PC2,
+                   colour = factor(group, labels = labels),
+                   label = sample)) +
+        geom_point(size = 3) +
+        scale_color_manual(values = colours) + 
+        labs(colour = "Group") +
+        theme_bw()
+
+
+plotly::ggplotly(
+    rpvg_pca$x %>%
+        as.data.frame() %>%
+        rownames_to_column("sample") %>%
+        as_tibble() %>%
+        dplyr::select(sample, PC1, PC2) %>%
+        left_join(rownames_to_column(dgeList_Filtered$samples, "sample")) %>%
+        ggplot(aes(x = PC1, y = PC2,
+                   colour = factor(group, labels = labels),
+                   label = sample)) +
+        geom_point(size = 1) +
+        scale_color_manual(values = colours) + 
+        labs(colour = "Group") +
+        theme_bw()
+)
+
+
+```
+```{r combined pca}
+# Prepare the data from the rpvg_pca
+rpvg_pca_data <- rpvg_pca$x %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  as_tibble() %>%
+  dplyr::select(sample, PC1, PC2) %>%
+  left_join(dge_subset$samples %>% rownames_to_column("sample")) %>%
+  mutate(method = "RPVG")  # Add a column to indicate the method
+
+# Prepare the data from the lin_pca
+lin_pca_data <- lin_pca$x %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  as_tibble() %>%
+  dplyr::select(sample, PC1, PC2) %>%
+  left_join(dgeList_Filtered$samples %>% rownames_to_column("sample")) %>%
+  mutate(method = "STAR")  # Add a column to indicate the method
+
+# Combine the data from both PCA results
+combined_data <- bind_rows(rpvg_pca_data, lin_pca_data)
+
+# Plot the combined data with different shapes for the two methods
+ggplot(combined_data, aes(x = PC1, y = PC2,
+                          colour = factor(group, labels = labels),
+                          shape = method)) +
+  geom_point(size = 4) +
+  scale_color_manual(values = colours) +
+  scale_shape_manual(values = c(15, 17)) +  # 16 for circles, 17 for triangles
+  labs(colour = "Group", shape = "Method") +
+  theme_bw()
+```
+```{r}
+
+
+```
+
